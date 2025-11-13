@@ -160,3 +160,6 @@ SAMBA_PASSWORD = os.environ.get('SAMBA_PASSWORD', '1')
 
 # Audio Encryption Key
 ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY', 'YUfrhpimMr-lkxklJq48554vm7KAJN1TSI7FXMyp2Hw=')
+
+# Development Mode - Use post_xml instead of get_customer_info
+USE_POST_XML = os.environ.get('USE_POST_XML', 'False').lower() == 'true'

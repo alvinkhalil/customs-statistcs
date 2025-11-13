@@ -74,10 +74,12 @@ class PassportAPI(APIView):
             # Convert to the desired format (YYYY-MM-DD)
             birth_date = date_obj.strftime("%Y-%m-%d")
             
-            name, surname, father_name, image = get_customer_info(fin, birth_date)
-            # name, surname, father_name, image = post_xml(fin)
-
-            # call_qmatic(host, port, branch_id, visit_id, name, surname, father_name, image, fin, birth_date)
+            # Development mode: Use post_xml if USE_POST_XML is True
+            if settings.USE_POST_XML:
+                name, surname, father_name, image = post_xml(fin)
+            else:
+                name, surname, father_name, image = get_customer_info(fin, birth_date)
+            
             # qmatic progress
             data = {
                 'host':host,
