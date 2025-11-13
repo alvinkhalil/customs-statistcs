@@ -529,9 +529,38 @@ class VisitListOfCustomer(APIView):
         entered_text = request.query_params.get('enteredText')
 
 
-        profile_query = """SELECT dc.first_name, dc.last_name, dc.pin, dc.father_name, dc.birth_date, dc.phone
-                FROM stat.dim_customer AS dc
-                WHERE dc.id = %s"""
+        # Get customer profile with phone, birth_date and image from visits_visit
+        profile_query = f"""
+            SELECT 
+                dc.first_name, 
+                dc.last_name, 
+                dc.pin, 
+                dc.father_name,
+                (SELECT vv.birth_date FROM visits_visit vv 
+                 WHERE vv.visit_id IN (
+                     SELECT dv.origin_id::varchar FROM dim_visit dv 
+                     WHERE dv.custom_1 = '{selected_customer}' 
+                     ORDER BY dv.created_timestamp DESC LIMIT 1
+                 ) ORDER BY vv.id LIMIT 1) as birth_date_from_visit,
+                dc.birth_date,
+                COALESCE(
+                    (SELECT vv.phone FROM visits_visit vv 
+                     WHERE vv.visit_id IN (
+                         SELECT dv.origin_id::varchar FROM dim_visit dv 
+                         WHERE dv.custom_1 = '{selected_customer}' 
+                         ORDER BY dv.created_timestamp DESC LIMIT 1
+                     ) ORDER BY vv.id LIMIT 1),
+                    dc.phone
+                ) as phone,
+                (SELECT vv.image FROM visits_visit vv 
+                 WHERE vv.visit_id IN (
+                     SELECT dv.origin_id::varchar FROM dim_visit dv 
+                     WHERE dv.custom_1 = '{selected_customer}' 
+                     ORDER BY dv.created_timestamp DESC LIMIT 1
+                 ) ORDER BY vv.id LIMIT 1) as image
+            FROM stat.dim_customer AS dc
+            WHERE dc.id = %s
+        """
         cursor = get_connection()
         cursor.execute(profile_query, (selected_customer,))
         columns = [col[0] for col in cursor.description]
@@ -540,7 +569,14 @@ class VisitListOfCustomer(APIView):
         if not profile_dic_data:
             return Response({"customer_id":"Customer not found!"},status=status.HTTP_404_NOT_FOUND)
         
-        profile_serializer_data = CustomerSerializer(profile_dic_data[0]).data
+        # Use birth_date from visits_visit if available, otherwise from dim_customer
+        profile_data = profile_dic_data[0]
+        if profile_data.get('birth_date_from_visit'):
+            profile_data['birth_date'] = profile_data['birth_date_from_visit']
+        # Remove the temporary field
+        profile_data.pop('birth_date_from_visit', None)
+        
+        profile_serializer_data = CustomerSerializer(profile_data).data
         pg_size = request.query_params.get('pg_size', 10)
         pg_num = request.query_params.get('pg_num', 1)
 
@@ -550,9 +586,6 @@ class VisitListOfCustomer(APIView):
                     dv.origin_id AS visit_origin_id,
                     COUNT(fvt.id) AS transactions_count,
                     dc.first_name, dc.last_name, dc.pin,
-                    (SELECT vv.phone FROM visits_visit vv WHERE vv.visit_id = dv.origin_id::varchar ORDER BY vv.id LIMIT 1) AS phone,
-                    (SELECT vv.birth_date FROM visits_visit vv WHERE vv.visit_id = dv.origin_id::varchar ORDER BY vv.id LIMIT 1) AS birth_date,
-                    (SELECT vv.image FROM visits_visit vv WHERE vv.visit_id = dv.origin_id::varchar ORDER BY vv.id LIMIT 1) AS image,
                 dv.ticket_id,
                 dv.created_timestamp,
                 sum(fvt.transaction_time) as total_transaction_time, 
@@ -631,10 +664,10 @@ class VisitListOfCustomer(APIView):
                 query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%'))"
                 count_query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%'))"
 
-        query += f'GROUP BY dv.id, dv.origin_id, dc.first_name, dc.last_name, dc.pin, dc.phone, dc.birth_date, dv.ticket_id OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}'
+        query += f'GROUP BY dv.id, dv.origin_id, dc.first_name, dc.last_name, dc.pin, dv.ticket_id OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}'
         
 
-        count_query+='GROUP BY dv.id,dc.first_name, dc.last_name, dc.pin, dc.phone, dc.birth_date, dv.ticket_id)  as subquery;'
+        count_query+='GROUP BY dv.id,dc.first_name, dc.last_name, dc.pin, dv.ticket_id)  as subquery;'
         
         cursor = get_connection()
         cursor.execute(query)
@@ -685,9 +718,14 @@ class VisitListOfCustomer(APIView):
                 })
         
         # Add declarations to each visit data using origin_id
+        # Remove phone, birth_date, image from visit data (they should only be in profile)
         for item in data:
             origin_id = str(item.get('visit_origin_id', ''))
             item['declarations'] = declarations_map.get(origin_id, [])
+            # Remove these fields from visit data
+            item.pop('phone', None)
+            item.pop('birth_date', None)
+            item.pop('image', None)
         
         result = VisitSerializer(data,many = True).data
         cursor.execute(count_query)

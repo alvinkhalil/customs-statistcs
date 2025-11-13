@@ -13,10 +13,12 @@ class CustomerSerializer(serializers.Serializer):
     father_name = serializers.CharField(max_length=100)
     birth_date = serializers.DateField()
     phone = serializers.CharField(max_length=20, allow_null=True, required=False)
+    image = serializers.CharField(max_length=500, allow_null=True, required=False)
     is_risk = serializers.BooleanField(default=False)
 
 
 class TransactionDataSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
     create_timestamp = serializers.DateTimeField(format=time_format)
     waiting_time = serializers.SerializerMethodField()
     call_timestamp = serializers.DateTimeField(format=time_format)
@@ -115,9 +117,6 @@ class VisitSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)
     pin = serializers.CharField(max_length=50)
-    phone = serializers.CharField(max_length=20, allow_null=True, required=False)
-    birth_date = serializers.SerializerMethodField()
-    image = serializers.CharField(max_length=500, allow_null=True, required=False)
     ticket_id = serializers.CharField(max_length=10)
     service_name = serializers.CharField(max_length=100)
     transactions_count = serializers.IntegerField()
