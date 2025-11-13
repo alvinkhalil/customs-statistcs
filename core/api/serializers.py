@@ -28,6 +28,7 @@ class TransactionDataSerializer(serializers.Serializer):
     finish_time = serializers.SerializerMethodField()
     note = serializers.CharField(allow_null=True, required=False)
     result = serializers.IntegerField(allow_null=True, required=False)
+    table = serializers.CharField(allow_null=True, required=False)
     status = serializers.SerializerMethodField()
 
     def get_waiting_time(self,obj):
@@ -116,6 +117,7 @@ class VisitSerializer(serializers.Serializer):
     pin = serializers.CharField(max_length=50)
     phone = serializers.CharField(max_length=20, allow_null=True, required=False)
     birth_date = serializers.SerializerMethodField()
+    image = serializers.CharField(max_length=500, allow_null=True, required=False)
     ticket_id = serializers.CharField(max_length=10)
     service_name = serializers.CharField(max_length=100)
     transactions_count = serializers.IntegerField()

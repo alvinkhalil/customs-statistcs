@@ -549,7 +549,10 @@ class VisitListOfCustomer(APIView):
                     dv.id AS visit_key,
                     dv.origin_id AS visit_origin_id,
                     COUNT(fvt.id) AS transactions_count,
-                    dc.first_name, dc.last_name, dc.pin, dc.phone, dc.birth_date,
+                    dc.first_name, dc.last_name, dc.pin,
+                    (SELECT vv.phone FROM visits_visit vv WHERE vv.visit_id = dv.origin_id::varchar ORDER BY vv.id LIMIT 1) AS phone,
+                    (SELECT vv.birth_date FROM visits_visit vv WHERE vv.visit_id = dv.origin_id::varchar ORDER BY vv.id LIMIT 1) AS birth_date,
+                    (SELECT vv.image FROM visits_visit vv WHERE vv.visit_id = dv.origin_id::varchar ORDER BY vv.id LIMIT 1) AS image,
                 dv.ticket_id,
                 dv.created_timestamp,
                 sum(fvt.transaction_time) as total_transaction_time, 
@@ -1044,7 +1047,16 @@ class TransactionList(APIView):
         pg_size = request.query_params.get('pg_size', 10)
         pg_num = request.query_params.get('pg_num', 1)
 
-        visit_query = f"""SELECT dv.id,dv.ticket_id,dv.created_timestamp,dv.custom_1,dv.origin_id FROM dim_visit AS dv where dv.id = '{visit_id}' """    
+        visit_query = f"""
+            SELECT 
+                dv.id,
+                dv.ticket_id,
+                dv.created_timestamp,
+                dv.custom_1,
+                dv.origin_id
+            FROM dim_visit AS dv 
+            WHERE dv.id = '{visit_id}'
+        """    
         cursor.execute(visit_query)
         visit_data = convert_data(cursor)
 
@@ -1062,7 +1074,8 @@ class TransactionList(APIView):
                 fvt.id, fvt.create_timestamp, fvt.waiting_time, fvt.call_timestamp ,fvt.transaction_time, fvt.outcome_key,
                 ds.first_name,ds.last_name,ds.name,
                 vn.content as note,
-                vn.status as result
+                vn.status as result,
+                vn.table as table
                 from fact_visit_transaction AS fvt
                 left join stat.dim_visit dv on dv.id = fvt.visit_key 
                 left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
@@ -1092,15 +1105,33 @@ class TransactionList(APIView):
         count = cursor.fetchall()
         
         # Get profile data with risk status
+        # Use phone, birth_date and image from visits_visit if available, otherwise from dim_customer
         profile_query = f"""
-            SELECT dc.first_name, dc.last_name, dc.pin, dc.father_name, dc.birth_date,
-            COALESCE(vrf.is_risk, false) as is_risk
+            SELECT 
+                dc.first_name, 
+                dc.last_name, 
+                dc.pin, 
+                dc.father_name,
+                (SELECT vv.birth_date FROM visits_visit vv WHERE vv.visit_id = '{visit_origin_id}'::varchar ORDER BY vv.id LIMIT 1) as birth_date_from_visit,
+                dc.birth_date as birth_date,
+                COALESCE(
+                    (SELECT vv.phone FROM visits_visit vv WHERE vv.visit_id = '{visit_origin_id}'::varchar ORDER BY vv.id LIMIT 1),
+                    dc.phone
+                ) as phone,
+                (SELECT vv.image FROM visits_visit vv WHERE vv.visit_id = '{visit_origin_id}'::varchar ORDER BY vv.id LIMIT 1) as image,
+                COALESCE(vrf.is_risk, false) as is_risk
             FROM stat.dim_customer AS dc
             LEFT JOIN visits_risk_fin vrf ON vrf.fin = dc.pin
             WHERE dc.id = {customer}
         """
         cursor.execute(profile_query)
         profile_data = convert_data(cursor)[0]
+        
+        # Use birth_date from visits_visit if available, otherwise from dim_customer
+        if profile_data.get('birth_date_from_visit'):
+            profile_data['birth_date'] = profile_data['birth_date_from_visit']
+        # Remove the temporary field
+        profile_data.pop('birth_date_from_visit', None)
         
         # Fetch declarations for the visit using origin_id
         declarations_query = f"""
