@@ -547,6 +547,7 @@ class VisitListOfCustomer(APIView):
         query = f"""
                 SELECT 
                     dv.id AS visit_key,
+                    dv.origin_id AS visit_origin_id,
                     COUNT(fvt.id) AS transactions_count,
                     dc.first_name, dc.last_name, dc.pin, dc.phone, dc.birth_date,
                 dv.ticket_id,
@@ -627,7 +628,7 @@ class VisitListOfCustomer(APIView):
                 query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%'))"
                 count_query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%'))"
 
-        query += f'GROUP BY dv.id,dc.first_name, dc.last_name, dc.pin, dc.phone, dc.birth_date, dv.ticket_id OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}'
+        query += f'GROUP BY dv.id, dv.origin_id, dc.first_name, dc.last_name, dc.pin, dc.phone, dc.birth_date, dv.ticket_id OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}'
         
 
         count_query+='GROUP BY dv.id,dc.first_name, dc.last_name, dc.pin, dc.phone, dc.birth_date, dv.ticket_id)  as subquery;'
@@ -636,14 +637,14 @@ class VisitListOfCustomer(APIView):
         cursor.execute(query)
         data = convert_data(cursor)
         
-        # Get all visit keys from the result
-        visit_keys = [str(item['visit_key']) for item in data if item.get('visit_key')]
+        # Get all origin_ids from the result (visits_declaration.visit_id = dim_visit.origin_id)
+        origin_ids = [str(item['visit_origin_id']) for item in data if item.get('visit_origin_id')]
         
-        # Fetch declarations for all visits
+        # Fetch declarations for all visits using origin_id
         declarations_map = {}
-        if visit_keys:
+        if origin_ids:
             # Use parameterized query to prevent SQL injection
-            placeholders = ','.join(['%s'] * len(visit_keys))
+            placeholders = ','.join(['%s'] * len(origin_ids))
             declarations_query = f"""
                 SELECT 
                     visit_id,
@@ -660,12 +661,12 @@ class VisitListOfCustomer(APIView):
                 WHERE visit_id IN ({placeholders})
                 ORDER BY visit_id, created_at DESC
             """
-            cursor.execute(declarations_query, visit_keys)
+            cursor.execute(declarations_query, origin_ids)
             declarations_data = convert_data(cursor)
             
-            # Group declarations by visit_id
+            # Group declarations by visit_id (which is origin_id)
             for decl in declarations_data:
-                visit_id = decl['visit_id']
+                visit_id = str(decl['visit_id'])
                 if visit_id not in declarations_map:
                     declarations_map[visit_id] = []
                 declarations_map[visit_id].append({
@@ -680,10 +681,10 @@ class VisitListOfCustomer(APIView):
                     'created_at': decl['created_at'].isoformat() if decl.get('created_at') else None
                 })
         
-        # Add declarations to each visit data
+        # Add declarations to each visit data using origin_id
         for item in data:
-            visit_key = str(item.get('visit_key'))
-            item['declarations'] = declarations_map.get(visit_key, [])
+            origin_id = str(item.get('visit_origin_id', ''))
+            item['declarations'] = declarations_map.get(origin_id, [])
         
         result = VisitSerializer(data,many = True).data
         cursor.execute(count_query)
@@ -1043,7 +1044,7 @@ class TransactionList(APIView):
         pg_size = request.query_params.get('pg_size', 10)
         pg_num = request.query_params.get('pg_num', 1)
 
-        visit_query = f"""SELECT dv.id,dv.ticket_id,dv.created_timestamp,dv.custom_1 FROM dim_visit AS dv where dv.id = '{visit_id}' """    
+        visit_query = f"""SELECT dv.id,dv.ticket_id,dv.created_timestamp,dv.custom_1,dv.origin_id FROM dim_visit AS dv where dv.id = '{visit_id}' """    
         cursor.execute(visit_query)
         visit_data = convert_data(cursor)
 
@@ -1051,6 +1052,7 @@ class TransactionList(APIView):
             return Response({'visit_id':'Visit_id not found!'},status = status.HTTP_404_NOT_FOUND)
         visit_data = visit_data[0]
         customer = visit_data['custom_1']
+        visit_origin_id = visit_data.get('origin_id')
         if not customer:
             return Response({'Customer':'Customer not found!'},status = status.HTTP_404_NOT_FOUND)
         
@@ -1065,7 +1067,7 @@ class TransactionList(APIView):
                 left join stat.dim_visit dv on dv.id = fvt.visit_key 
                 left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
                 left join stat.dim_staff ds on ds.id = fvt.staff_key 
-                left join visits_note vn on vn.user_id = ds.origin_id::varchar AND vn.visit_id = dv.origin_id::varchar
+                left join visits_note vn on vn.user_id::integer = ds.origin_id AND vn.visit_id = dv.origin_id::varchar
                 where fvt.visit_key = '{visit_id}'
                 ORDER BY fvt.id, vn.created_at DESC
             ) AS subquery
@@ -1100,7 +1102,7 @@ class TransactionList(APIView):
         cursor.execute(profile_query)
         profile_data = convert_data(cursor)[0]
         
-        # Fetch declarations for the visit
+        # Fetch declarations for the visit using origin_id
         declarations_query = f"""
             SELECT 
                 visit_id,
@@ -1117,7 +1119,12 @@ class TransactionList(APIView):
             WHERE visit_id = %s
             ORDER BY created_at DESC
         """
-        cursor.execute(declarations_query, (str(visit_id),))
+        # Use origin_id instead of visit_id for declarations
+        declarations_visit_id = str(visit_origin_id) if visit_origin_id else None
+        if declarations_visit_id:
+            cursor.execute(declarations_query, (declarations_visit_id,))
+        else:
+            cursor.execute("SELECT 1 WHERE 1=0")  # Return empty result if no origin_id
         declarations_data = convert_data(cursor)
         
         # Format declarations data
