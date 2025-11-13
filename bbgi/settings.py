@@ -144,7 +144,7 @@ DB_PASSWORD = os.environ.get('DB_PASSWORD', 'stat')
 QP_AGENT_DB_NAME = os.environ.get('QP_AGENT_DB_NAME', 'qp_agent')
 QP_AGENT_DB_HOST = os.environ.get('QP_AGENT_DB_HOST', DB_HOST)
 QP_AGENT_DB_PORT = os.environ.get('QP_AGENT_DB_PORT', DB_PORT)
-QP_AGENT_DB_USER = os.environ.get('QP_AGENT_DB_USER', DB_USER)
+QP_AGENT_DB_USER = os.environ.get('QP_AGENT_DB_USER', 'qp_agent')
 QP_AGENT_DB_PASSWORD = os.environ.get('QP_AGENT_DB_PASSWORD', DB_PASSWORD)
 
 # QMatic API Configuration
@@ -163,3 +163,25 @@ ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY', 'YUfrhpimMr-lkxklJq48554vm7KAJ
 
 # Development Mode - Use post_xml instead of get_customer_info
 USE_POST_XML = os.environ.get('USE_POST_XML', 'False').lower() == 'true'
+
+# Logging Configuration
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'core.api.views': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+    },
+}

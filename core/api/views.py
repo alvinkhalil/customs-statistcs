@@ -29,6 +29,9 @@ from smbprotocol.open import Open, CreateDisposition, ImpersonationLevel, ShareA
 from smbprotocol.file_info import InfoType
 import io
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 def get_connection():
     conn = psycopg2.connect(
@@ -1200,13 +1203,51 @@ class RiskFinUpdateApi(APIView):
             host=settings.QP_AGENT_DB_HOST,
             port=settings.QP_AGENT_DB_PORT
         )
+        # search_path'i qp_agent schema'sına ayarla
+        cursor = conn.cursor()
+        cursor.execute("SET search_path TO qp_agent, public")
+        # search_path'i kontrol et
+        cursor.execute("SHOW search_path")
+        search_path = cursor.fetchone()[0]
+        logger.info(f"QP_AGENT DB: search_path = {search_path}")
+        
+        # Tabloyu kontrol et
+        cursor.execute("""
+            SELECT table_schema, table_name 
+            FROM information_schema.tables 
+            WHERE table_name = 'visits_risk_fin'
+        """)
+        tables = cursor.fetchall()
+        logger.info(f"QP_AGENT DB: Found tables: {tables}")
+        
+        # qp_agent schema'sında tablo var mı kontrol et
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 
+                FROM information_schema.tables 
+                WHERE table_schema = 'qp_agent' 
+                AND table_name = 'visits_risk_fin'
+            )
+        """)
+        table_exists = cursor.fetchone()[0]
+        logger.info(f"QP_AGENT DB: qp_agent.visits_risk_fin exists: {table_exists}")
+        
+        cursor.close()
         return conn
     
-    def _upsert_risk_fin(self, conn, fin, is_risk, note=None):
+    def _upsert_risk_fin(self, conn, fin, is_risk, note=None, schema=None):
         """Execute UPSERT query for risk_fin table"""
         cursor = conn.cursor()
-        upsert_query = """
-            INSERT INTO visits_risk_fin (fin, is_risk, note, created_at, updated_at)
+        # Schema belirtilmişse kullan, yoksa public schema
+        table_name = f"{schema}.visits_risk_fin" if schema else "visits_risk_fin"
+        
+        # Debug: search_path'i kontrol et
+        cursor.execute("SHOW search_path")
+        search_path = cursor.fetchone()[0]
+        logger.info(f"_upsert_risk_fin: Using table_name = {table_name}, search_path = {search_path}")
+        
+        upsert_query = f"""
+            INSERT INTO {table_name} (fin, is_risk, note, created_at, updated_at)
             VALUES (%s, %s, %s, NOW(), NOW())
             ON CONFLICT (fin) 
             DO UPDATE SET 
@@ -1215,6 +1256,7 @@ class RiskFinUpdateApi(APIView):
                 updated_at = NOW()
             RETURNING id, fin, is_risk, note, created_at, updated_at;
         """
+        logger.info(f"_upsert_risk_fin: Executing query: {upsert_query[:100]}...")
         cursor.execute(upsert_query, (fin, is_risk, note))
         result = cursor.fetchone()
         cursor.close()
@@ -1245,15 +1287,43 @@ class RiskFinUpdateApi(APIView):
             statdb_conn = statdb_cursor.connection
             
             # Update in statdb
-            statdb_result = self._upsert_risk_fin(statdb_conn, fin, is_risk, note)
-            statdb_conn.commit()
+            try:
+                statdb_result = self._upsert_risk_fin(statdb_conn, fin, is_risk, note)
+                statdb_conn.commit()
+            except Exception as e:
+                statdb_conn.rollback()
+                return Response(
+                    {"error": f"Error in statdb database: {str(e)}"}, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
             
             # Get connection to qp_agent database
             qp_agent_conn = self._get_qp_agent_connection()
             
             # Update in qp_agent database
-            qp_agent_result = self._upsert_risk_fin(qp_agent_conn, fin, is_risk, note)
-            qp_agent_conn.commit()
+            try:
+                # Schema belirtmeden dene (public schema veya search_path'te olabilir)
+                logger.info(f"Attempting to update qp_agent database with fin={fin}")
+                qp_agent_result = self._upsert_risk_fin(qp_agent_conn, fin, is_risk, note)
+                qp_agent_conn.commit()
+                logger.info(f"Successfully updated qp_agent database")
+            except Exception as e:
+                qp_agent_conn.rollback()
+                error_msg = str(e)
+                logger.error(f"Error in qp_agent database: {error_msg}")
+                logger.error(f"Error type: {type(e).__name__}")
+                return Response(
+                    {
+                        "error": f"Error in qp_agent database: {error_msg}",
+                        "debug_info": {
+                            "db_name": settings.QP_AGENT_DB_NAME,
+                            "db_host": settings.QP_AGENT_DB_HOST,
+                            "db_user": settings.QP_AGENT_DB_USER,
+                            "error_type": type(e).__name__
+                        }
+                    }, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
             
             if statdb_result:
                 response_data = {
