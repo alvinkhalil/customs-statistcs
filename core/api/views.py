@@ -25,7 +25,7 @@ from cryptography.fernet import Fernet
 from smbprotocol.connection import Connection
 from smbprotocol.session import Session
 from smbprotocol.tree import TreeConnect
-from smbprotocol.open import Open, CreateDisposition, ImpersonationLevel, ShareAccess, CreateOptions
+from smbprotocol.open import Open, CreateDisposition, ImpersonationLevel, ShareAccess, CreateOptions, FilePipePrinterAccessMask
 from smbprotocol.file_info import InfoType
 import io
 import uuid
@@ -1472,8 +1472,10 @@ class AudioRecordingApi(APIView):
             username = settings.SAMBA_USERNAME
             password = settings.SAMBA_PASSWORD
             
-            # Fayl yolu: recordings/YYYY-MM-DD/transaction_id.enc
+            # Fayl yolu: recordings/YYYY-MM-DD/transaction_id.enc (forward slash istifadə et)
             file_path = f"recordings/{date}/{transaction_id}.enc"
+            
+            logger.info(f"Samba connection: server={server}, share={share}, file_path={file_path}")
             
             # Samba serverə qoşul
             connection = Connection(uuid.uuid4(), server, 445)
@@ -1482,13 +1484,18 @@ class AudioRecordingApi(APIView):
             session = Session(connection, username, password)
             session.connect()
             
-            tree = TreeConnect(session, f"\\\\{server}\\{share}")
+            # TreeConnect üçün sadəcə share adını istifadə et
+            tree = TreeConnect(session, share)
             tree.connect()
+            
+            logger.info(f"Trying to open file: {file_path}")
             
             # Faylı aç
             file_open = Open(tree, file_path)
             file_open.create(
                 ImpersonationLevel.Impersonation,
+                FilePipePrinterAccessMask.FILE_READ_DATA | FilePipePrinterAccessMask.FILE_READ_ATTRIBUTES,
+                0,  # file_attributes
                 ShareAccess.FILE_SHARE_READ,
                 CreateDisposition.FILE_OPEN,
                 CreateOptions.FILE_NON_DIRECTORY_FILE
@@ -1503,20 +1510,165 @@ class AudioRecordingApi(APIView):
             session.disconnect()
             connection.disconnect()
             
+            logger.info(f"File read successfully, size: {len(file_data)} bytes")
             return file_data
             
         except Exception as e:
-            raise Exception(f"Samba server error: {str(e)}")
+            error_str = str(e)
+            logger.error(f"Samba error details: server={settings.SAMBA_SERVER_IP}, share={settings.SAMBA_SHARE_NAME}, file_path=recordings/{date}/{transaction_id}.enc, error={error_str}")
+            
+            # Fayl tapılmadığında aydın mesaj ver
+            if "STATUS_OBJECT_PATH_NOT_FOUND" in error_str or "path does not exist" in error_str.lower() or "0xc000003a" in error_str:
+                raise FileNotFoundError(f"Audio file not found: recordings/{date}/{transaction_id}.enc")
+            
+            raise Exception(f"Samba server error: {error_str}")
+    
+    def _add_wav_header(self, pcm_data):
+        """Raw PCM data-ya WAV header əlavə et
+        Local agent format: 16-bit, mono, 16kHz
+        """
+        import struct
+        
+        # WAV format parametrləri (local agent-dən)
+        sample_rate = 16000  # 16 kHz
+        num_channels = 1  # Mono
+        bits_per_sample = 16  # 16-bit
+        byte_rate = sample_rate * num_channels * (bits_per_sample // 8)
+        block_align = num_channels * (bits_per_sample // 8)
+        
+        # PCM data ölçüsü
+        data_size = len(pcm_data)
+        
+        # WAV header yarat
+        # RIFF header
+        wav_header = b'RIFF'
+        # File size (data size + 36 bytes header - 8 bytes)
+        wav_header += struct.pack('<I', data_size + 36)
+        # WAVE format
+        wav_header += b'WAVE'
+        # fmt chunk
+        wav_header += b'fmt '
+        # fmt chunk size
+        wav_header += struct.pack('<I', 16)  # PCM format
+        # Audio format (1 = PCM)
+        wav_header += struct.pack('<H', 1)
+        # Number of channels
+        wav_header += struct.pack('<H', num_channels)
+        # Sample rate
+        wav_header += struct.pack('<I', sample_rate)
+        # Byte rate
+        wav_header += struct.pack('<I', byte_rate)
+        # Block align
+        wav_header += struct.pack('<H', block_align)
+        # Bits per sample
+        wav_header += struct.pack('<H', bits_per_sample)
+        # data chunk
+        wav_header += b'data'
+        # data chunk size
+        wav_header += struct.pack('<I', data_size)
+        
+        # WAV header + PCM data
+        wav_data = wav_header + pcm_data
+        
+        logger.info(f"WAV header əlavə edildi: {len(wav_header)} bytes header + {data_size} bytes PCM = {len(wav_data)} bytes total")
+        
+        return wav_data
     
     def _decrypt_audio(self, encrypted_data):
-        """Decrypt encrypted audio data"""
+        """Decrypt encrypted audio data (stream format from local_agent)"""
         try:
+            if not encrypted_data:
+                raise ValueError("Encrypted data is empty or None")
+            
+            # Faylın ilk bir neçə byte-ını yoxla (debug üçün)
+            logger.info(f"First 50 bytes (hex): {encrypted_data[:50].hex()}")
+            logger.info(f"First 50 bytes (repr): {repr(encrypted_data[:50])}")
+            
             encryption_key = settings.ENCRYPTION_KEY.encode()
-            fernet = Fernet(encryption_key)
-            decrypted_data = fernet.decrypt(encrypted_data)
-            return decrypted_data
+            
+            # Encryption key-in düzgün olduğunu yoxla
+            try:
+                fernet = Fernet(encryption_key)
+            except Exception as e:
+                logger.error(f"Invalid encryption key format: {str(e)}")
+                raise Exception(f"Invalid encryption key: {str(e)}")
+            
+            logger.info(f"Attempting to decrypt data, size: {len(encrypted_data)} bytes")
+            
+            # Local agent StreamEncryptor formatını parse et
+            # Format: [4 byte chunk size (big-endian)] [encrypted chunk] [4 byte chunk size] [encrypted chunk] ...
+            decrypted_chunks = []
+            offset = 0
+            
+            try:
+                while offset < len(encrypted_data):
+                    # Chunk size-ı oxu (4 byte, big-endian)
+                    if offset + 4 > len(encrypted_data):
+                        logger.warning(f"Not enough data for chunk size at offset {offset}")
+                        break
+                    
+                    chunk_size = int.from_bytes(encrypted_data[offset:offset+4], 'big')
+                    offset += 4
+                    
+                    logger.info(f"Reading chunk at offset {offset-4}, size: {chunk_size} bytes")
+                    
+                    # Encrypted chunk-u oxu
+                    if offset + chunk_size > len(encrypted_data):
+                        logger.error(f"Not enough data for chunk. Expected {chunk_size} bytes, but only {len(encrypted_data) - offset} bytes available")
+                        raise Exception(f"Invalid encrypted data: chunk size mismatch at offset {offset-4}")
+                    
+                    encrypted_chunk = encrypted_data[offset:offset+chunk_size]
+                    offset += chunk_size
+                    
+                    # Chunk-u decrypt et
+                    try:
+                        decrypted_chunk = fernet.decrypt(encrypted_chunk)
+                        decrypted_chunks.append(decrypted_chunk)
+                        logger.info(f"Decrypted chunk successfully, size: {len(decrypted_chunk)} bytes")
+                    except Exception as decrypt_error:
+                        error_msg = str(decrypt_error)
+                        logger.error(f"Failed to decrypt chunk at offset {offset-chunk_size}: {error_msg}")
+                        if "InvalidToken" in error_msg:
+                            raise Exception(f"Decryption failed: Invalid encryption key. The file may be encrypted with a different key. Please check ENCRYPTION_KEY in settings.")
+                        else:
+                            raise Exception(f"Decryption failed: {error_msg}")
+                
+                # Bütün chunk-ları birləşdir
+                if not decrypted_chunks:
+                    raise Exception("No chunks were decrypted. File format may be incorrect.")
+                
+                decrypted_data = b''.join(decrypted_chunks)
+                logger.info(f"Decryption successful, total decrypted size: {len(decrypted_data)} bytes ({len(decrypted_chunks)} chunks)")
+                
+                return decrypted_data
+                
+            except Exception as stream_error:
+                # Stream format parse edilmədi, bəlkə sadə formatdır (legacy)
+                logger.warning(f"Stream format parsing failed: {str(stream_error)}. Trying direct decryption...")
+                
+                # Variant: Direkt decrypt (legacy format üçün)
+                try:
+                    logger.info("Attempting direct decryption (legacy format)")
+                    decrypted_data = fernet.decrypt(encrypted_data)
+                    logger.info("Direct decryption successful (legacy format)")
+                    return decrypted_data
+                except Exception as direct_error:
+                    error_msg = str(direct_error)
+                    logger.error(f"Direct decryption also failed: {error_msg}")
+                    if "InvalidToken" in error_msg:
+                        raise Exception(f"Decryption failed: Invalid encryption key. The file may be encrypted with a different key. Please check ENCRYPTION_KEY in settings.")
+                    else:
+                        raise Exception(f"Decryption failed. Stream format error: {str(stream_error)}, Direct error: {error_msg}")
+            
+        except ValueError as e:
+            error_msg = f"Invalid encrypted data format: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
         except Exception as e:
-            raise Exception(f"Decryption error: {str(e)}")
+            error_type = type(e).__name__
+            error_msg = str(e) if str(e) else f"{error_type} occurred during decryption"
+            logger.error(f"Decryption error ({error_type}): {error_msg}")
+            raise Exception(f"Decryption error: {error_msg}")
     
     def get(self, request):
         try:
@@ -1529,36 +1681,78 @@ class AudioRecordingApi(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Validate date format
-            try:
-                datetime.strptime(date, '%Y-%m-%d')
-            except ValueError:
+            # Parse date format - frontend'den "13-11-2025 14:22:10" formatında gelebilir
+            parsed_date = None
+            date_formats = [
+                '%d-%m-%Y %H:%M:%S',  # 13-11-2025 14:22:10
+                '%d-%m-%Y',            # 13-11-2025
+                '%Y-%m-%d',             # 2025-11-13
+                '%Y-%m-%d %H:%M:%S',    # 2025-11-13 14:22:10
+            ]
+            
+            for date_format in date_formats:
+                try:
+                    parsed_date = datetime.strptime(date, date_format)
+                    break
+                except ValueError:
+                    continue
+            
+            if not parsed_date:
                 return Response(
-                    {"error": "Invalid date format. Use YYYY-MM-DD"}, 
+                    {"error": f"Invalid date format: {date}. Supported formats: DD-MM-YYYY HH:MM:SS, DD-MM-YYYY, YYYY-MM-DD"}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # Samba'da axtarış üçün YYYY-MM-DD formatına çevir
+            formatted_date = parsed_date.strftime('%Y-%m-%d')
+            
             # Samba serverdən faylı götür
-            encrypted_data = self._get_samba_file(date, transaction_id)
+            try:
+                encrypted_data = self._get_samba_file(formatted_date, transaction_id)
+            except FileNotFoundError as e:
+                # Fayl tapılmadığında aydın mesaj ver
+                return Response(
+                    {"error": f"Audio file not found: recordings/{formatted_date}/{transaction_id}.enc"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            except Exception as e:
+                # Digər Samba xətaları
+                logger.error(f"Samba connection error: {str(e)}")
+                return Response(
+                    {"error": f"Samba server error: {str(e)}"}, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
             
             if not encrypted_data:
                 return Response(
-                    {"error": "Audio file not found"}, 
+                    {"error": f"Audio file not found: recordings/{formatted_date}/{transaction_id}.enc"}, 
                     status=status.HTTP_404_NOT_FOUND
                 )
             
             # Decrypt et
-            decrypted_data = self._decrypt_audio(encrypted_data)
+            try:
+                decrypted_data = self._decrypt_audio(encrypted_data)
+            except Exception as e:
+                logger.error(f"Decryption error: {str(e)}")
+                return Response(
+                    {"error": f"Decryption error: {str(e)}"}, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
             
-            # Audio faylı response et
-            response = HttpResponse(decrypted_data, content_type='audio/wav')
+            # Decrypted data raw PCM-dir, WAV header əlavə et
+            wav_data = self._add_wav_header(decrypted_data)
+            
+            # Audio faylı response et - inline ile direkt çalınması üçün
+            response = HttpResponse(wav_data, content_type='audio/wav')
             response['Content-Disposition'] = f'inline; filename="{transaction_id}.wav"'
-            response['Content-Length'] = len(decrypted_data)
+            response['Content-Length'] = len(wav_data)
+            response['Accept-Ranges'] = 'bytes'
             
             return response
             
         except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
             return Response(
-                {"error": str(e)}, 
+                {"error": f"Internal server error: {str(e)}"}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
