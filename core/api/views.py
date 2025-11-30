@@ -414,6 +414,7 @@ class CustomerList(APIView):
         selected_last_name = request.GET.get('last_name')
         selected_father_name = request.GET.get('father_name')
         pin = request.GET.get('pin')
+        customs_number = request.GET.get('customsnumber')
         name = request.GET.get('name')
         min_date_selected = request.GET.get('minDateSelected',None)
         max_date_selected = request.GET.get('maxDateSelected',None)
@@ -422,7 +423,7 @@ class CustomerList(APIView):
 
         query = """
             select dc.first_name, dc.last_name, dc.father_name, dc.birth_date, dc.pin, dc.phone, dc.visits_count  as visits, dc.id as customer_id,dc.created_at,
-            COALESCE(vrf.is_risk, false) as is_risk
+            COALESCE(vrf.is_risk, false) as is_risk, vrf.note as note
             from stat.dim_visit dv 
             left join stat.dim_customer dc on dc.id::varchar = dv.custom_1 
             left join stat.fact_visit_transaction  fvt on fvt.visit_key = dv.id 
@@ -474,6 +475,16 @@ class CustomerList(APIView):
             query += f"AND ds.name ilike '%{name}%'"
             count_query += f"AND ds.name ilike '%{name}%'"
 
+        if customs_number:
+            customs_filter = f"""AND EXISTS (
+                SELECT 1 
+                FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.customs_number ILIKE '%{customs_number}%'
+            )"""
+            query += customs_filter
+            count_query += customs_filter
+
 
         if min_date_selected and max_date_selected:
             query += f"AND dc.birth_date >= '{min_date_selected}' AND dc.birth_date <= '{max_date_selected}'"
@@ -487,7 +498,7 @@ class CustomerList(APIView):
         if order_created_at == 'asc' or order_created_at == 'desc':
             order = order_created_at
             
-        query += f"group by custom_1,dc.first_name,dc.last_name, dc.father_name, dc.birth_date,dc.pin, dc.phone, dc.visits_count, dc.id,dc.created_at, vrf.is_risk order by dc.created_at {order} OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size};"
+        query += f"group by custom_1,dc.first_name,dc.last_name, dc.father_name, dc.birth_date,dc.pin, dc.phone, dc.visits_count, dc.id,dc.created_at, vrf.is_risk, vrf.note order by dc.created_at {order} OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size};"
 
         cursor.execute(query)
         data = convert_data(cursor)

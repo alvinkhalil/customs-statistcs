@@ -198,6 +198,7 @@ class CustomerAllSerializer(serializers.Serializer):
     count = serializers.IntegerField(source = 'visits')
     created_at = serializers.DateTimeField(format=time_format)
     is_risk = serializers.BooleanField(default=False)
+    risk_note = serializers.CharField(source='note', allow_null=True, required=False)
     
     def get_birth_date(self,obj):
         converted_date = obj['birth_date']
