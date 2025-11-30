@@ -1052,7 +1052,7 @@ class Export(APIView):
         elif key == 'csv':
             url = self.generate_url('csv', link, df)
 
-        url = 'http://' + host + '/media/' + url
+        url = 'http://' + host + '/stmedia/' + url
         return url
     
 
