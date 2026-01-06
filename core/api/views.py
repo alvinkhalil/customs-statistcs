@@ -609,7 +609,13 @@ class VisitListOfCustomer(APIView):
                 WHERE vn.visit_id = dv.id::varchar 
                     AND vn.action = 'finish'
                     ORDER BY vn.created_at ASC LIMIT 1) 
-                    AS result
+                    AS result,
+                (SELECT dvet.name FROM fact_visit_transaction s_fvt
+                LEFT JOIN fact_visit_events s_fve ON s_fve.visit_transaction_id = s_fvt.id
+                LEFT JOIN dim_visit_event_type dvet ON dvet.id = s_fve.visit_event_type_key
+                WHERE s_fvt.visit_key = dv.id
+                    ORDER BY s_fvt.create_timestamp DESC LIMIT 1) 
+                    AS status
                 FROM 
                     dim_visit dv
                 left join fact_visit_transaction fvt ON dv.id = fvt.visit_key
@@ -1123,12 +1129,15 @@ class TransactionList(APIView):
                 ds.first_name,ds.last_name,ds.name,
                 vn.content as note,
                 vn.status as result,
-                vn.table as table
+                vn.table as table,
+                dvet.name as status
                 from fact_visit_transaction AS fvt
                 left join stat.dim_visit dv on dv.id = fvt.visit_key 
                 left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
                 left join stat.dim_staff ds on ds.id = fvt.staff_key 
                 left join visits_note vn on vn.user_id::integer = ds.origin_id AND vn.visit_id = dv.origin_id::varchar
+                left join fact_visit_events fve on fve.visit_transaction_id = fvt.id
+                left join dim_visit_event_type dvet on dvet.id = fve.visit_event_type_key
                 where fvt.visit_key = '{visit_id}'
                 ORDER BY fvt.id, vn.created_at DESC
             ) AS subquery
@@ -1166,7 +1175,12 @@ class TransactionList(APIView):
                     (SELECT vv.phone FROM visits_visit vv WHERE vv.visit_id = '{visit_origin_id}'::varchar ORDER BY vv.id LIMIT 1),
                     dc.phone
                 ) as phone,
-                (SELECT vv.image FROM visits_visit vv WHERE vv.visit_id = '{visit_origin_id}'::varchar ORDER BY vv.id LIMIT 1) as image,
+                (SELECT vv.image FROM visits_visit vv 
+                 WHERE vv.visit_id IN (
+                     SELECT dv.origin_id::varchar FROM dim_visit dv 
+                     WHERE dv.custom_1 = '{customer}' 
+                     ORDER BY dv.created_timestamp DESC LIMIT 1
+                 ) ORDER BY vv.id LIMIT 1) as image,
                 COALESCE(vrf.is_risk, false) as is_risk
             FROM stat.dim_customer AS dc
             LEFT JOIN visits_risk_fin vrf ON vrf.fin = dc.pin

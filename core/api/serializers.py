@@ -50,8 +50,8 @@ class TransactionDataSerializer(serializers.Serializer):
         return None
     
     def get_status(self, obj):
-        """Return status, default is 'Xidmət göstərildi'"""
-        return "Xidmət göstərildi"
+        """Return status from database (dim_visit_event_type.name), default is 'Xidmət göstərildi'"""
+        return obj.get('status', 'Xidmət göstərildi')
 
 
 class StatisticSerializer(serializers.Serializer):
@@ -183,8 +183,8 @@ class VisitSerializer(serializers.Serializer):
         return declarations
     
     def get_status(self, obj):
-        """Return status, default is 'Xidmət göstərildi'"""
-        return "Xidmət göstərildi"
+        """Return status from database (last transaction's dim_visit_event_type.name), default is 'Xidmət göstərildi'"""
+        return obj.get('status', 'Xidmət göstərildi')
 
 
 class CustomerAllSerializer(serializers.Serializer):
