@@ -606,12 +606,12 @@ class VisitListOfCustomer(APIView):
                     ORDER BY create_timestamp LIMIT 1) 
                     AS service_name,
                 (SELECT vn.status FROM visits_note vn
-                WHERE vn.visit_id = dv.id::varchar 
+                WHERE vn.visit_id = dv.origin_id::varchar 
                     AND vn.action = 'finish'
                     ORDER BY vn.created_at ASC LIMIT 1) 
                     AS result,
                 (SELECT dvet.name FROM fact_visit_transaction s_fvt
-                LEFT JOIN fact_visit_events s_fve ON s_fve.visit_transaction_id = s_fvt.id
+                LEFT JOIN fact_visit_events s_fve ON s_fve.visit_transaction_id = s_fvt.visit_transaction_id
                 LEFT JOIN dim_visit_event_type dvet ON dvet.id = s_fve.visit_event_type_key
                 WHERE s_fvt.visit_key = dv.id
                     ORDER BY s_fvt.create_timestamp DESC LIMIT 1) 
