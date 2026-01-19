@@ -1136,7 +1136,7 @@ class TransactionList(APIView):
                 left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
                 left join stat.dim_staff ds on ds.id = fvt.staff_key 
                 left join visits_note vn on vn.user_id::integer = ds.origin_id AND vn.visit_id = dv.origin_id::varchar
-                left join fact_visit_events fve on fve.visit_transaction_id = fvt.id
+                left join fact_visit_events fve on fve.visit_transaction_id = fvt.visit_transaction_id
                 left join dim_visit_event_type dvet on dvet.id = fve.visit_event_type_key
                 where fvt.visit_key = '{visit_id}'
                 ORDER BY fvt.id, vn.created_at DESC
